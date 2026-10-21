@@ -1,6 +1,6 @@
 """Backtest the supply and demand zone strategy on daily bars.
 
-Run: python -m tradingagents.zone_backtest MNQ=F
+Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare to test the filters)
 
 Each day the zones are rebuilt from bars up to that close only. A resting limit
 order sits at the nearest fresh zone's edge, with the stop beyond the zone and the
@@ -51,9 +51,12 @@ def _exit(side, stop, target, bar):
     return None
 
 
-def run(df: pd.DataFrame) -> pd.DataFrame:
+def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False) -> pd.DataFrame:
+    """trend: longs only above the 200 SMA, shorts only below it.
+    confirm: enter at the close of a bar that touches the zone and rejects it."""
     df = df.reset_index(drop=True)
     atr = wrap(df.copy())["atr"]
+    sma = df.Close.rolling(200).mean()
     trades, used, t = [], set(), WINDOW
     while t < len(df) - 1:
         lo = t + 1 - WINDOW
@@ -68,6 +71,8 @@ def run(df: pd.DataFrame) -> pd.DataFrame:
             side, entry, stop, target = plan
             if (side == "long") != (entry < last) or abs(entry - stop) <= 0:
                 continue
+            if trend and (pd.isna(sma.iloc[t]) or (side == "long") != (last > sma.iloc[t])):
+                continue
             if abs(target - entry) / abs(entry - stop) < MIN_RR:
                 continue
             order = (key, side, entry, stop, target)
@@ -80,6 +85,14 @@ def run(df: pd.DataFrame) -> pd.DataFrame:
         for i in range(t + 1, min(t + 1 + ORDER_LIFE, len(df))):
             bar = df.iloc[i]
             touched = bar.Low <= entry if side == "long" else bar.High >= entry
+            if touched and confirm:
+                rejected = bar.Close > entry and bar.Close > bar.Open if side == "long" \
+                    else bar.Close < entry and bar.Close < bar.Open
+                if not rejected:
+                    continue
+                risk_c = abs(bar.Close - stop)
+                if risk_c <= 0 or abs(target - bar.Close) / risk_c < MIN_RR:
+                    continue
             if touched:
                 fill = i
                 break
@@ -92,9 +105,14 @@ def run(df: pd.DataFrame) -> pd.DataFrame:
             px = df.Open.iloc[fill]
         if side == "short" and df.Open.iloc[fill] >= entry:
             px = df.Open.iloc[fill]
+        first = fill
+        if confirm:
+            px, first = df.Close.iloc[fill], fill + 1
+            if first >= len(df):
+                break
         risk = abs(px - stop)
-        out, end = None, fill
-        for i in range(fill, min(fill + MAX_HOLD, len(df))):
+        out, end = None, first
+        for i in range(first, min(first + MAX_HOLD, len(df))):
             hit = _exit(side, stop, target, df.iloc[i])
             if hit is not None:
                 out, end = hit, i
@@ -126,6 +144,22 @@ def summarize(trades: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def compare(df: pd.DataFrame, split: str = "2016-01-01") -> str:
+    """Each variant over all years, the years before `split` and the years after it."""
+    rows = ["variant           period     trades  win%   avgR  totalR"]
+    for name, kw in (("baseline", {}), ("trend", {"trend": True}), ("confirm", {"confirm": True}),
+                     ("trend+confirm", {"trend": True, "confirm": True})):
+        trades = run(df, **kw)
+        for label, g in (("all", trades), ("before", trades[trades.entered < split]),
+                         ("after", trades[trades.entered >= split])):
+            if g.empty:
+                rows.append(f"{name:<17} {label:<10} {0:>6}")
+                continue
+            rows.append(f"{name:<17} {label:<10} {len(g):>6} {100 * (g.R > 0).mean():>5.1f} "
+                        f"{g.R.mean():>+6.2f} {g.R.sum():>+7.1f}")
+    return "\n".join(rows)
+
+
 def load(symbol: str) -> pd.DataFrame:
     import yfinance as yf
 
@@ -139,6 +173,9 @@ if __name__ == "__main__":
     symbol = sys.argv[1] if len(sys.argv) > 1 else "MNQ=F"
     data = load(symbol)
     print(f"{symbol}: {len(data)} daily bars, {data.Date.iloc[0]:%Y-%m-%d} to {data.Date.iloc[-1]:%Y-%m-%d}")
+    if "--compare" in sys.argv:
+        print(compare(data))
+        sys.exit()
     result = run(data)
     print(summarize(result))
     result.to_csv("zone_backtest_trades.csv", index=False)
