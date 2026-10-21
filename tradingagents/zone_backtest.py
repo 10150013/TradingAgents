@@ -1,6 +1,6 @@
 """Backtest the supply and demand zone strategy on daily bars.
 
-Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare to test the filters)
+Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare for the filters, --grid for the settings; several symbols allowed)
 
 Each day the zones are rebuilt from bars up to that close only. A resting limit
 order sits at the nearest fresh zone's edge, with the stop beyond the zone and the
@@ -160,6 +160,31 @@ def compare(df: pd.DataFrame, split: str = "2016-01-01") -> str:
     return "\n".join(rows)
 
 
+def grid(df: pd.DataFrame, split: str = "2016-01-01") -> str:
+    """Try zone settings; a setting only counts if it earns in both halves."""
+    from tradingagents.dataflows.vendors.yahoo import supply_demand as sd
+
+    global MIN_RR
+    saved = (sd.IMPULSE_ATR, sd.MAX_BASE_BARS, sd.MIN_RR, MIN_RR)
+    rows = []
+    try:
+        for impulse in (1.5, 2.0, 3.0):
+            for base in (1, 3, 5):
+                for rr in (2.0, 3.0):
+                    sd.IMPULSE_ATR, sd.MAX_BASE_BARS, sd.MIN_RR, MIN_RR = impulse, base, rr, rr
+                    t = run(df)
+                    a, b = t[t.entered < split], t[t.entered >= split]
+                    avg = lambda g: g.R.mean() if len(g) else float("nan")
+                    rows.append((impulse, base, rr, len(t), len(a), avg(a), len(b), avg(b)))
+    finally:
+        sd.IMPULSE_ATR, sd.MAX_BASE_BARS, sd.MIN_RR, MIN_RR = saved
+    out = ["impulse base  rr  trades | before: n  avgR | after: n  avgR | both positive"]
+    for r in sorted(rows, key=lambda r: -(r[5] if r[5] == r[5] else -9)):
+        ok = "YES" if r[5] > 0 and r[7] > 0 and r[3] >= 30 else ""
+        out.append(f"{r[0]:>7} {r[1]:>4} {r[2]:>4} {r[3]:>7} | {r[4]:>9} {r[5]:>+5.2f} | {r[6]:>8} {r[7]:>+5.2f} | {ok}")
+    return "\n".join(out)
+
+
 def load(symbol: str) -> pd.DataFrame:
     import yfinance as yf
 
@@ -170,13 +195,16 @@ def load(symbol: str) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    symbol = sys.argv[1] if len(sys.argv) > 1 else "MNQ=F"
-    data = load(symbol)
-    print(f"{symbol}: {len(data)} daily bars, {data.Date.iloc[0]:%Y-%m-%d} to {data.Date.iloc[-1]:%Y-%m-%d}")
-    if "--compare" in sys.argv:
-        print(compare(data))
-        sys.exit()
-    result = run(data)
-    print(summarize(result))
-    result.to_csv("zone_backtest_trades.csv", index=False)
-    print("Trade list saved to zone_backtest_trades.csv")
+    symbols = [a for a in sys.argv[1:] if not a.startswith("--")] or ["MNQ=F"]
+    for symbol in symbols:
+        data = load(symbol)
+        print(f"\n{symbol}: {len(data)} daily bars, {data.Date.iloc[0]:%Y-%m-%d} to {data.Date.iloc[-1]:%Y-%m-%d}")
+        if "--grid" in sys.argv:
+            print(grid(data))
+        elif "--compare" in sys.argv:
+            print(compare(data))
+        else:
+            result = run(data)
+            print(summarize(result))
+            result.to_csv("zone_backtest_trades.csv", index=False)
+            print("Trade list saved to zone_backtest_trades.csv")
