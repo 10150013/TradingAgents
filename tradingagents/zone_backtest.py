@@ -1,6 +1,6 @@
 """Backtest the supply and demand zone strategy on daily bars.
 
-Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare for the filters, --grid for the settings, --optimize to tune win rate; several symbols allowed)
+Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare for the filters, --grid for the settings, --optimize to tune win rate, --improve for extra filters; several symbols allowed)
 
 Each day the zones are rebuilt from bars up to that close only. A resting limit
 order sits at the nearest fresh zone's edge, with the stop beyond the zone and the
@@ -59,17 +59,23 @@ def _exit(side, stop, target, bar):
 
 
 def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float = 0.1,
-        target_r: float | None = None, min_rr: float | None = None, cache: dict | None = None) -> pd.DataFrame:
+        target_r: float | None = None, min_rr: float | None = None, cache: dict | None = None,
+        rsi: tuple[float, float] | None = None, max_age: int | None = None,
+        max_height: float | None = None) -> pd.DataFrame:
     """trend: longs only above the 200 SMA, shorts only below it.
     confirm: enter at the close of a bar that touches the zone and rejects it.
     pad: stop distance beyond the zone, in ATRs.  target_r: fixed R target instead of the
     next opposite zone.  min_rr: smallest reward-to-risk taken (zone targets only).
-    cache: reuse each day's zones between runs on the same data and zone settings."""
+    cache: reuse each day's zones between runs on the same data and zone settings.
+    rsi: (long_max, short_min) - longs only when RSI(14) is at or below the first value, shorts
+    only at or above the second.  max_age: ignore zones formed more than this many calendar days
+    ago.  max_height: ignore zones taller than this many ATRs."""
     min_rr = MIN_RR if min_rr is None else min_rr
     cache = {} if cache is None else cache
     df = df.reset_index(drop=True)
     atr = wrap(df.copy())["atr"]
     sma = df.Close.rolling(200).mean()
+    rsi_s = wrap(df.copy())["rsi"]
     trades, used, t = [], set(), WINDOW
     while t < len(df) - 1:
         lo = t + 1 - WINDOW
@@ -89,6 +95,12 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
             if trend and (pd.isna(sma.iloc[t]) or (side == "long") != (last > sma.iloc[t])):
                 continue
             if not target_r and abs(target - entry) / abs(entry - stop) < min_rr:
+                continue
+            if rsi and not pd.isna(rsi_s.iloc[t]) and (rsi_s.iloc[t] > rsi[0] if side == "long" else rsi_s.iloc[t] < rsi[1]):
+                continue
+            if max_age and (df.Date.iloc[t] - z["date"]).days > max_age:
+                continue
+            if max_height and (z["top"] - z["bottom"]) > max_height * z["atr"]:
                 continue
             order = (key, side, entry, stop, target)
             break
@@ -242,6 +254,54 @@ def optimize(dfs: dict[str, pd.DataFrame], split: str = "2016-01-01", min_train:
     return "\n".join(out)
 
 
+def improve(tune: dict[str, pd.DataFrame], check: dict[str, pd.DataFrame], split: str = "2016-01-01",
+            min_train: int = 25) -> str:
+    """Add indicator and zone-quality filters to the best base setting. Chosen on the years before
+    `split` on the `tune` markets; shown on their later years and on the `check` markets, which are
+    never used to choose."""
+    from tradingagents.dataflows.vendors.yahoo import supply_demand as sd
+
+    saved = (sd.IMPULSE_ATR, sd.MAX_BASE_BARS)
+    sd.IMPULSE_ATR, sd.MAX_BASE_BARS = 1.5, 3
+    caches = {k: {} for k in {**tune, **check}}
+
+    def pooled(dfs, **kw):
+        parts = [run(d, cache=caches[k], **kw) for k, d in dfs.items()]
+        parts = [x for x in parts if not x.empty]
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["entered", "R"])
+
+    def stat(g):
+        return (len(g), 100 * (g.R > 0).mean(), g.R.mean()) if len(g) else (0, float("nan"), float("nan"))
+
+    rows = []
+    try:
+        for target_r in (1.0, 1.5):
+            for rsi in (None, (45, 55), (40, 60)):
+                for max_age in (None, 90, 180):
+                    for max_height in (None, 1.0, 2.0):
+                        kw = dict(target_r=target_r, rsi=rsi, max_age=max_age, max_height=max_height)
+                        t = pooled(tune, **kw)
+                        c = pooled(check, **kw)
+                        name = f"target={target_r}R rsi={rsi or 'off'} age<={max_age or 'any'} height<={max_height or 'any'}"
+                        rows.append((name, t[t.entered < split], t[t.entered >= split], c, kw == dict(
+                            target_r=1.0, rsi=None, max_age=None, max_height=None)))
+    finally:
+        sd.IMPULSE_ATR, sd.MAX_BASE_BARS = saved
+
+    ok = [r for r in rows if len(r[1]) >= min_train and r[1].R.mean() > 0]
+    ok.sort(key=lambda r: (-stat(r[1])[1], -stat(r[1])[2]))
+    head = (f"Tuned on {', '.join(tune)} before {split}; 'later' = same markets after; "
+            f"'other markets' = {', '.join(check)}, never used to choose.")
+    cols = "setting                                                     | early n win% avgR | later n win% avgR | other n win% avgR"
+    fmt = lambda r: " | ".join(f"{n:>5} {w:>4.0f} {a:>+5.2f}" for n, w, a in (stat(r[1]), stat(r[2]), stat(r[3])))
+    out = [head, f"Settings tried: {len(rows)}; eligible: {len(ok)}", "", cols]
+    base = [r for r in rows if r[4]][0]
+    out.append(f"{'CURRENT BEST (no extra filters)':<59} | {fmt(base)}")
+    for r in ok[:8]:
+        out.append(f"{r[0]:<59} | {fmt(r)}")
+    return "\n".join(out)
+
+
 def load(symbol: str) -> pd.DataFrame:
     from tradingagents.dataflows.vendors.yahoo.history import load_full_history
 
@@ -250,6 +310,10 @@ def load(symbol: str) -> pd.DataFrame:
 
 if __name__ == "__main__":
     symbols = [a for a in sys.argv[1:] if not a.startswith("--")] or ["MNQ=F"]
+    if "--improve" in sys.argv:
+        tune, check = ("NQ=F", "ES=F"), ("YM=F", "RTY=F")
+        print(improve({k: load(k) for k in tune}, {k: load(k) for k in check}))
+        sys.exit()
     if "--optimize" in sys.argv:
         print(optimize({sym: load(sym) for sym in symbols}))
         sys.exit()
