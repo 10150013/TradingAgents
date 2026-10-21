@@ -1,6 +1,6 @@
 """Backtest the supply and demand zone strategy on daily bars.
 
-Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare for the filters, --grid for the settings; several symbols allowed)
+Run: python -m tradingagents.zone_backtest MNQ=F   (add --compare for the filters, --grid for the settings, --optimize to tune win rate; several symbols allowed)
 
 Each day the zones are rebuilt from bars up to that close only. A resting limit
 order sits at the nearest fresh zone's edge, with the stop beyond the zone and the
@@ -24,14 +24,21 @@ MAX_HOLD = 30     # a trade still open after this many bars exits at the close
 ORDER_LIFE = 5    # a resting order is cancelled if it has not filled by then
 
 
-def _plan(zone: dict, zones: list[dict]):
-    """(side, entry, stop, target) for a zone, or None without an opposite zone."""
-    pad = 0.1 * zone["atr"]
+def _plan(zone: dict, zones: list[dict], pad: float = 0.1, target_r: float | None = None):
+    """(side, entry, stop, target) for a zone.
+
+    The target is the next opposite zone, or target_r times the risk when set.
+    None when there is no opposite zone to aim at."""
+    gap = pad * zone["atr"]
     if zone["type"] == "demand":
-        entry, stop = zone["top"], zone["bottom"] - pad
+        entry, stop = zone["top"], zone["bottom"] - gap
+        if target_r:
+            return "long", entry, stop, entry + target_r * (entry - stop)
         above = [z["bottom"] for z in zones if z["type"] == "supply" and z["bottom"] > entry]
         return ("long", entry, stop, min(above)) if above else None
-    entry, stop = zone["bottom"], zone["top"] + pad
+    entry, stop = zone["bottom"], zone["top"] + gap
+    if target_r:
+        return "short", entry, stop, entry - target_r * (stop - entry)
     below = [z["top"] for z in zones if z["type"] == "demand" and z["top"] < entry]
     return ("short", entry, stop, max(below)) if below else None
 
@@ -51,21 +58,29 @@ def _exit(side, stop, target, bar):
     return None
 
 
-def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False) -> pd.DataFrame:
+def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float = 0.1,
+        target_r: float | None = None, min_rr: float | None = None, cache: dict | None = None) -> pd.DataFrame:
     """trend: longs only above the 200 SMA, shorts only below it.
-    confirm: enter at the close of a bar that touches the zone and rejects it."""
+    confirm: enter at the close of a bar that touches the zone and rejects it.
+    pad: stop distance beyond the zone, in ATRs.  target_r: fixed R target instead of the
+    next opposite zone.  min_rr: smallest reward-to-risk taken (zone targets only).
+    cache: reuse each day's zones between runs on the same data and zone settings."""
+    min_rr = MIN_RR if min_rr is None else min_rr
+    cache = {} if cache is None else cache
     df = df.reset_index(drop=True)
     atr = wrap(df.copy())["atr"]
     sma = df.Close.rolling(200).mean()
     trades, used, t = [], set(), WINDOW
     while t < len(df) - 1:
         lo = t + 1 - WINDOW
-        zones = find_zones(df.iloc[lo:t + 1].reset_index(drop=True), atr.iloc[lo:t + 1].reset_index(drop=True))
+        if t not in cache:
+            cache[t] = find_zones(df.iloc[lo:t + 1].reset_index(drop=True), atr.iloc[lo:t + 1].reset_index(drop=True))
+        zones = cache[t]
         last = df.Close.iloc[t]
         order = None
         for z in zones:
             key = (z["type"], z["date"])
-            plan = _plan(z, zones)
+            plan = _plan(z, zones, pad, target_r)
             if key in used or plan is None:
                 continue
             side, entry, stop, target = plan
@@ -73,7 +88,7 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False) -> pd.Data
                 continue
             if trend and (pd.isna(sma.iloc[t]) or (side == "long") != (last > sma.iloc[t])):
                 continue
-            if abs(target - entry) / abs(entry - stop) < MIN_RR:
+            if not target_r and abs(target - entry) / abs(entry - stop) < min_rr:
                 continue
             order = (key, side, entry, stop, target)
             break
@@ -91,7 +106,7 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False) -> pd.Data
                 if not rejected:
                     continue
                 risk_c = abs(bar.Close - stop)
-                if risk_c <= 0 or abs(target - bar.Close) / risk_c < MIN_RR:
+                if risk_c <= 0 or (not target_r and abs(target - bar.Close) / risk_c < min_rr):
                     continue
             if touched:
                 fill = i
@@ -185,17 +200,59 @@ def grid(df: pd.DataFrame, split: str = "2016-01-01") -> str:
     return "\n".join(out)
 
 
-def load(symbol: str) -> pd.DataFrame:
-    import yfinance as yf
+def optimize(dfs: dict[str, pd.DataFrame], split: str = "2016-01-01", min_train: int = 30) -> str:
+    """Pick the setting with the highest win rate that still earns, using the years before
+    `split` on all symbols pooled, then report it on the years after (not used to choose)."""
+    from tradingagents.dataflows.vendors.yahoo import supply_demand as sd
 
-    df = yf.download(symbol, period="max", interval="1d", auto_adjust=False, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna().reset_index().rename(columns={"index": "Date"})
+    saved = (sd.IMPULSE_ATR, sd.MAX_BASE_BARS)
+    rows = []
+    try:
+        for impulse in (1.5, 2.0):
+            for base in (3, 5):
+                sd.IMPULSE_ATR, sd.MAX_BASE_BARS = impulse, base
+                caches = {k: {} for k in dfs}
+                for trend in (False, True):
+                    for pad in (0.1, 0.5):
+                        for target_r, min_rr in [(None, 1.5), (None, 2.0), (None, 3.0), (1.0, None), (1.5, None), (2.0, None)]:
+                            parts = [run(d, trend=trend, pad=pad, target_r=target_r, min_rr=min_rr, cache=caches[k])
+                                     for k, d in dfs.items()]
+                            t = pd.concat([x for x in parts if not x.empty], ignore_index=True) if any(
+                                not x.empty for x in parts) else pd.DataFrame(columns=["entered", "R"])
+                            a, b = t[t.entered < split], t[t.entered >= split]
+                            name = f"impulse={impulse} base={base} trend={'on' if trend else 'off'} pad={pad} " + \
+                                (f"target={target_r}R" if target_r else f"target=zone rr>={min_rr}")
+                            rows.append((name, a, b))
+    finally:
+        sd.IMPULSE_ATR, sd.MAX_BASE_BARS = saved
+
+    def stat(g):
+        return (len(g), 100 * (g.R > 0).mean(), g.R.mean()) if len(g) else (0, float("nan"), float("nan"))
+
+    ok = [r for r in rows if len(r[1]) >= min_train and r[1].R.mean() > 0]
+    ok.sort(key=lambda r: (-stat(r[1])[1], -stat(r[1])[2]))
+    out = [f"Chosen on years before {split}, pooled over {', '.join(dfs)}; 'after' was not used to choose.",
+           f"Settings tried: {len(rows)}; eligible (>= {min_train} early trades and avg R > 0): {len(ok)}", "",
+           "setting                                                   | early n win%  avgR | later n win%  avgR"]
+    for name, a, b in ok[:8]:
+        (n1, w1, r1), (n2, w2, r2) = stat(a), stat(b)
+        out.append(f"{name:<57} | {n1:>7} {w1:>4.0f} {r1:>+5.2f} | {n2:>7} {w2:>4.0f} {r2:>+5.2f}")
+    if not ok:
+        out.append("No setting earned in the early years with enough trades.")
+    return "\n".join(out)
+
+
+def load(symbol: str) -> pd.DataFrame:
+    from tradingagents.dataflows.vendors.yahoo.history import load_full_history
+
+    return load_full_history(symbol)
 
 
 if __name__ == "__main__":
     symbols = [a for a in sys.argv[1:] if not a.startswith("--")] or ["MNQ=F"]
+    if "--optimize" in sys.argv:
+        print(optimize({sym: load(sym) for sym in symbols}))
+        sys.exit()
     for symbol in symbols:
         data = load(symbol)
         print(f"\n{symbol}: {len(data)} daily bars, {data.Date.iloc[0]:%Y-%m-%d} to {data.Date.iloc[-1]:%Y-%m-%d}")
