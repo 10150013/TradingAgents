@@ -13,6 +13,7 @@ from tradingagents.dataflows.date_window import as_of, as_of_window
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 from tradingagents.dataflows.router import no_data_available, route_to_vendor, vendor_unavailable
 from tradingagents.dataflows.vendors.yahoo.snapshot import build_verified_market_snapshot
+from tradingagents.dataflows.vendors.yahoo.supply_demand import build_supply_demand_report
 
 
 @tool
@@ -90,6 +91,25 @@ def get_verified_market_snapshot(
         return build_verified_market_snapshot(symbol, as_of(curr_date, trade_date), look_back_days)
     except VendorUnavailableError as exc:
         return vendor_unavailable("get_verified_market_snapshot", exc)
+    except NoMarketDataError as exc:
+        return no_data_available(exc)
+
+
+@tool
+def get_supply_demand_zones(
+    symbol: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "the current trading date, YYYY-mm-dd"],
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Fresh supply and demand zones on daily bars, nearest to the last close first,
+    each with a stop beyond the zone, a target at the next opposite zone and its
+    risk:reward. Use it for zone prices instead of estimating them.
+    """
+    try:
+        return build_supply_demand_report(symbol, as_of(curr_date, trade_date))
+    except VendorUnavailableError as exc:
+        return vendor_unavailable("get_supply_demand_zones", exc)
     except NoMarketDataError as exc:
         return no_data_available(exc)
 

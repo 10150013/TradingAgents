@@ -57,6 +57,10 @@ def create_trader(llm):
                     "instrument's quote currency (for example 189.5), never a percentage "
                     "or a range; convert a percentage distance to the price level it "
                     "implies, or omit the field if you cannot state a number. "
+                    + "Trade supply and demand: buy near a fresh demand zone and sell near a fresh supply "
+                    "zone, put the stop just beyond the zone, and target the next opposite zone. Take the "
+                    "trade only if that is at least 1:2 risk to reward, otherwise Hold. Size the position "
+                    "so a stop-out loses 1-2% of the account. "
                     + NO_EXTERNAL_TOOLS
                     + get_language_instruction()
                 ),
