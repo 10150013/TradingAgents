@@ -8,6 +8,11 @@ target at the next opposite zone; trades under MIN_RR are skipped. One trade at 
 time. If a bar hits both stop and target, the stop counts first. Results are in R
 (1R = the distance from entry to stop), so they do not depend on position size.
 Daily bars only: there is no lower-time-frame reversal-candle confirmation.
+
+On the bar where an order fills, only the stop can hit (strict_fill, on by default): the order of
+price moves inside a bar is unknown, so a target touched on that bar may have come before the fill.
+Counting those as wins (strict_fill=False) lifted the pooled win rate from about 45% to 66% on
+daily bars and from 52% to 73% on 5-minute bars, and turned a small loss into a profit.
 """
 
 from __future__ import annotations
@@ -70,7 +75,8 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
         rsi: tuple[float, float] | None = None, max_age: int | None = None,
         max_height: float | None = None, window: int = WINDOW, max_hold: int = MAX_HOLD,
         order_life: int = ORDER_LIFE, cost: float = 0.0, min_risk: float = 0.0,
-        trend_up: pd.Series | None = None, sides: tuple[str, ...] = ("long", "short")) -> pd.DataFrame:
+        trend_up: pd.Series | None = None, sides: tuple[str, ...] = ("long", "short"),
+        strict_fill: bool = True) -> pd.DataFrame:
     """trend: longs only above the 200 SMA, shorts only below it.
     confirm: enter at the close of a bar that touches the zone and rejects it.
     pad: stop distance beyond the zone, in ATRs.  target_r: fixed R target instead of the
@@ -159,7 +165,11 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
         risk = abs(px - stop)
         out, end = None, first
         for i in range(first, min(first + max_hold, len(df))):
-            hit = _exit(side, stop, target, df.iloc[i])
+            bar = df.iloc[i]
+            if strict_fill and i == fill and not confirm:
+                hit = stop if (bar.Low <= stop if side == "long" else bar.High >= stop) else None
+            else:
+                hit = _exit(side, stop, target, bar)
             if hit is not None:
                 out, end = hit, i
                 break
@@ -181,7 +191,7 @@ def daily_trend(df: pd.DataFrame, daily: pd.DataFrame, length: int = 20) -> pd.S
     return pd.Series(up.reindex(df.Date.dt.normalize(), method="ffill").values, index=df.index)
 
 
-def run_intraday(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> pd.DataFrame:
+def run_intraday(df: pd.DataFrame, daily: pd.DataFrame | None = None, strict_fill: bool = True) -> pd.DataFrame:
     """The strategy with the 5-minute settings and costs taken off.
 
     With `daily` (daily bars of the same market) it only buys in a daily uptrend and only
@@ -192,7 +202,7 @@ def run_intraday(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> pd.Data
     sd.IMPULSE_ATR, sd.MAX_BASE_BARS = INTRADAY_ZONES["impulse"], INTRADAY_ZONES["base"]
     try:
         trend = daily_trend(df, daily) if daily is not None else None
-        return run(df, cost=COST_FRAC * df.Close.median(), trend_up=trend, **INTRADAY)
+        return run(df, cost=COST_FRAC * df.Close.median(), trend_up=trend, strict_fill=strict_fill, **INTRADAY)
     finally:
         sd.IMPULSE_ATR, sd.MAX_BASE_BARS = saved
 
