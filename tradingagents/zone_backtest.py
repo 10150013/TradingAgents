@@ -69,7 +69,8 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
         target_r: float | None = None, min_rr: float | None = None, cache: dict | None = None,
         rsi: tuple[float, float] | None = None, max_age: int | None = None,
         max_height: float | None = None, window: int = WINDOW, max_hold: int = MAX_HOLD,
-        order_life: int = ORDER_LIFE, cost: float = 0.0, min_risk: float = 0.0) -> pd.DataFrame:
+        order_life: int = ORDER_LIFE, cost: float = 0.0, min_risk: float = 0.0,
+        trend_up: pd.Series | None = None, sides: tuple[str, ...] = ("long", "short")) -> pd.DataFrame:
     """trend: longs only above the 200 SMA, shorts only below it.
     confirm: enter at the close of a bar that touches the zone and rejects it.
     pad: stop distance beyond the zone, in ATRs.  target_r: fixed R target instead of the
@@ -81,7 +82,9 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
     window / max_hold / order_life: bars of zone history, bars a trade may stay open, bars a
     resting order lives (the defaults suit daily bars).  cost: round-trip slippage plus
     commission in price points, taken off every trade.  min_risk: skip trades whose stop is
-    closer than this many points, where costs would eat the target."""
+    closer than this many points, where costs would eat the target.
+    trend_up: one True/False per bar (the market is in an uptrend); when given, longs are taken
+    only in an uptrend and shorts only in a downtrend.  sides: which directions may trade."""
     min_rr = MIN_RR if min_rr is None else min_rr
     cache = {} if cache is None else cache
     df = df.reset_index(drop=True)
@@ -103,6 +106,10 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
                 continue
             side, entry, stop, target = plan
             if (side == "long") != (entry < last) or abs(entry - stop) <= max(min_risk, 1e-9):
+                continue
+            if side not in sides:
+                continue
+            if trend_up is not None and (pd.isna(trend_up.iloc[t]) or (side == "long") != bool(trend_up.iloc[t])):
                 continue
             if trend and (pd.isna(sma.iloc[t]) or (side == "long") != (last > sma.iloc[t])):
                 continue
@@ -167,14 +174,25 @@ def run(df: pd.DataFrame, trend: bool = False, confirm: bool = False, pad: float
     return pd.DataFrame(trades)
 
 
-def run_intraday(df: pd.DataFrame) -> pd.DataFrame:
-    """The strategy with the 5-minute settings and costs taken off."""
+def daily_trend(df: pd.DataFrame, daily: pd.DataFrame, length: int = 20) -> pd.Series:
+    """For each bar of `df`: True when the previous day closed above its `length`-day average."""
+    day = daily.set_index("Date").Close
+    up = (day > day.rolling(length).mean()).shift(1)
+    return pd.Series(up.reindex(df.Date.dt.normalize(), method="ffill").values, index=df.index)
+
+
+def run_intraday(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> pd.DataFrame:
+    """The strategy with the 5-minute settings and costs taken off.
+
+    With `daily` (daily bars of the same market) it only buys in a daily uptrend and only
+    sells in a daily downtrend."""
     from tradingagents.dataflows.vendors.yahoo import supply_demand as sd
 
     saved = (sd.IMPULSE_ATR, sd.MAX_BASE_BARS)
     sd.IMPULSE_ATR, sd.MAX_BASE_BARS = INTRADAY_ZONES["impulse"], INTRADAY_ZONES["base"]
     try:
-        return run(df, cost=COST_FRAC * df.Close.median(), **INTRADAY)
+        trend = daily_trend(df, daily) if daily is not None else None
+        return run(df, cost=COST_FRAC * df.Close.median(), trend_up=trend, **INTRADAY)
     finally:
         sd.IMPULSE_ATR, sd.MAX_BASE_BARS = saved
 
@@ -342,6 +360,10 @@ if __name__ == "__main__":
         for symbol in symbols:
             data = load(symbol, intraday)
             print(f"\n{symbol} {intraday}: {len(data)} bars, {data.Date.iloc[0]:%Y-%m-%d} to {data.Date.iloc[-1]:%Y-%m-%d}")
+            daily = load(symbol)
+            print("-- with the daily trend filter (buy only in an uptrend, sell only in a downtrend)")
+            print(summarize(run_intraday(data, daily)))
+            print("-- without it")
             print(summarize(run_intraday(data)))
         sys.exit()
     if "--improve" in sys.argv:
