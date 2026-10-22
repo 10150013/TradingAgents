@@ -1,0 +1,130 @@
+//@version=5
+// Supply and demand zones with limit entries, stop beyond the zone and a fixed R target.
+// Same rules as tradingagents/zone_backtest.py, so TradingView's Strategy Tester can run it on
+// any chart and time frame (MNQ1!, NQ1!, ...). Not financial advice; test on paper first.
+strategy("Supply & Demand Zones", overlay=true, pyramiding=0, initial_capital=50000,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.5,
+     max_boxes_count=100)
+
+impulse   = input.float(1.5, "Leg-out size (ATR)", minval=0.5, step=0.1)
+baseMax   = input.float(0.8, "Base candle max range (ATR)", minval=0.1, step=0.1)
+baseBars  = input.int(3, "Max base candles", minval=1, maxval=5)
+legBars   = input.int(3, "Max leg-out candles", minval=1, maxval=5)
+padATR    = input.float(0.1, "Stop beyond zone (ATR)", minval=0.0, step=0.05)
+targetR   = input.float(1.0, "Target (R)", minval=0.5, step=0.25)
+orderLife = input.int(5, "Cancel unfilled order after (bars)", minval=1)
+maxHold   = input.int(30, "Close trade after (bars)", minval=1)
+maxZones  = input.int(40, "Zones kept", minval=5, maxval=90)
+showZones = input.bool(true, "Draw zones")
+
+atr = ta.atr(14)
+
+var float[] zTop   = array.new_float()
+var float[] zBot   = array.new_float()
+var float[] zAtr   = array.new_float()
+var int[]   zType  = array.new_int()   // 1 demand, -1 supply
+var int[]   zStart = array.new_int()
+var box[]   zBox   = array.new_box()
+
+// 1) Find new zones: narrow base candles, then a strong move away within legBars candles.
+for m = 1 to legBars
+    for L = 1 to baseBars
+        s = m + L - 1
+        a = atr[s]
+        if not na(a) and bar_index - s >= 0
+            top = high[m]
+            bot = low[m]
+            ok = true
+            for j = 0 to L - 1
+                top := math.max(top, high[m + j])
+                bot := math.min(bot, low[m + j])
+                if high[m + j] - low[m + j] >= baseMax * a
+                    ok := false
+            if ok
+                legHi = close
+                legLo = close
+                for q = 0 to m - 1
+                    legHi := math.max(legHi, close[q])
+                    legLo := math.min(legLo, close[q])
+                startIdx = bar_index - s
+                if not array.includes(zStart, startIdx)
+                    kind = legHi - top >= impulse * a ? 1 : bot - legLo >= impulse * a ? -1 : 0
+                    if kind != 0
+                        array.push(zTop, top)
+                        array.push(zBot, bot)
+                        array.push(zAtr, a)
+                        array.push(zType, kind)
+                        array.push(zStart, startIdx)
+                        b = showZones ? box.new(startIdx, top, bar_index, bot, extend=extend.right,
+                             border_color=kind == 1 ? color.green : color.red,
+                             bgcolor=kind == 1 ? color.new(color.green, 85) : color.new(color.red, 85)) : na
+                        array.push(zBox, b)
+
+// 2) Drop zones that price has closed through, and keep the list short.
+if array.size(zTop) > 0
+    for i = array.size(zTop) - 1 to 0
+        broken = array.get(zType, i) == 1 ? close < array.get(zBot, i) : close > array.get(zTop, i)
+        if broken or array.size(zTop) > maxZones
+            b = array.get(zBox, i)
+            if not na(b)
+                box.delete(b)
+            array.remove(zTop, i)
+            array.remove(zBot, i)
+            array.remove(zAtr, i)
+            array.remove(zType, i)
+            array.remove(zStart, i)
+            array.remove(zBox, i)
+
+// 3) Trade management.
+var int orderBar = na
+var int entryBar = na
+
+if strategy.position_size != 0
+    if na(entryBar)
+        entryBar := bar_index
+    orderBar := na
+    if bar_index - entryBar >= maxHold
+        strategy.close_all()
+else
+    entryBar := na
+
+if strategy.position_size == 0 and not na(orderBar) and bar_index - orderBar >= orderLife
+    strategy.cancel_all()
+    orderBar := na
+
+// 4) Place one resting limit order at the nearest fresh zone (demand below price, supply above).
+if strategy.position_size == 0 and na(orderBar) and array.size(zTop) > 0
+    best = -1
+    bestDist = 1e12
+    for i = 0 to array.size(zTop) - 1
+        t = array.get(zType, i)
+        edge = t == 1 ? array.get(zTop, i) : array.get(zBot, i)
+        if (t == 1 and edge < close) or (t == -1 and edge > close)
+            d = math.abs(close - edge)
+            if d < bestDist
+                bestDist := d
+                best := i
+    if best >= 0
+        t = array.get(zType, best)
+        gap = padATR * array.get(zAtr, best)
+        if t == 1
+            entry = array.get(zTop, best)
+            stop = array.get(zBot, best) - gap
+            strategy.entry("Long", strategy.long, limit=entry)
+            strategy.exit("Long exit", "Long", stop=stop, limit=entry + targetR * (entry - stop))
+        else
+            entry = array.get(zBot, best)
+            stop = array.get(zTop, best) + gap
+            strategy.entry("Short", strategy.short, limit=entry)
+            strategy.exit("Short exit", "Short", stop=stop, limit=entry - targetR * (stop - entry))
+        orderBar := bar_index
+        b = array.get(zBox, best)
+        if not na(b)
+            box.delete(b)
+        array.remove(zTop, best)
+        array.remove(zBot, best)
+        array.remove(zAtr, best)
+        array.remove(zType, best)
+        array.remove(zStart, best)
+        array.remove(zBox, best)
