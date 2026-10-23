@@ -1,0 +1,29 @@
+//@version=5
+// Dip-buy in an uptrend. Use on the DAILY chart of MNQ1! (also fine on QQQ/SPY).
+// Entry: close above the 200-day average, 3 straight down closes, then the next bar closes up -> buy at that close.
+// Exit: close above the prior bar's high, or a 4% stop, or after 5 bars.
+strategy("Dip Buy 3-Down + Up Bar", overlay=true, process_orders_on_close=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.005, slippage=1)
+
+stopPct = input.float(4.0, "Stop %", minval=0.5, step=0.5) / 100
+maxBars = input.int(5, "Max bars in trade", minval=1)
+trendLen = input.int(200, "Trend average length", minval=20)
+
+ma = ta.sma(close, trendLen)
+down3 = close[1] < close[2] and close[2] < close[3] and close[3] < close[4]
+signal = down3 and close[1] > ma[1] and close > close[1]
+
+var int entryBar = na
+if signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    entryBar := bar_index
+
+if strategy.position_size > 0
+    strategy.exit("Stop", "Long", stop=strategy.position_avg_price * (1 - stopPct))
+    if bar_index > entryBar and (close > high[1] or bar_index - entryBar >= maxBars)
+        strategy.close("Long", comment="Exit")
+
+plot(ma, "200 MA", color=color.new(color.orange, 0))
+plotshape(signal and strategy.position_size == 0, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+alertcondition(signal, "Dip buy signal", "MNQ dip-buy: 3 down closes then an up bar above the 200 MA. Buy at the close.")
