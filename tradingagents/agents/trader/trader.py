@@ -5,6 +5,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 
 from tradingagents.agents.context import (
+    get_grounding_rule,
     get_instrument_context_from_state,
     get_language_instruction,
     get_portfolio_context_from_state,
@@ -60,7 +61,11 @@ def create_trader(llm):
                     + "Trade supply and demand: buy near a fresh demand zone and sell near a fresh supply "
                     "zone, put the stop just beyond the zone, and target the next opposite zone. Take the "
                     "trade only if that is at least 1:2 risk to reward, otherwise Hold. Size the position "
-                    "so a stop-out loses 1-2% of the account. "
+                    "so a stop-out loses 1-2% of the account, and state the size in those terms "
+                    "(account risk %), not as a share of the portfolio. If the last close is not at "
+                    "the zone, say the order is a pending limit order at the zone and give its "
+                    "distance from the last close. "
+                    + get_grounding_rule()
                     + NO_EXTERNAL_TOOLS
                     + get_language_instruction()
                 ),
