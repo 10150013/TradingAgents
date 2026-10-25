@@ -33,7 +33,7 @@ if strategy.position_size > 0
         strategy.close("Long", comment="Exit")
 
 // Lucid-style end-of-day drawdown check
-var float peak = initial_capital
+var float peak = strategy.initial_capital
 var float minCushion = ddLimit
 var bool breached = false
 peak := math.max(peak, strategy.equity)
