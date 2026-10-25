@@ -37,7 +37,7 @@ var float peak = initial_capital
 var float minCushion = ddLimit
 var bool breached = false
 peak := math.max(peak, strategy.equity)
-floorBal = math.min(peak - ddLimit, initial_capital)
+floorBal = math.min(peak - ddLimit, strategy.initial_capital)
 cushion = strategy.equity - floorBal
 minCushion := math.min(minCushion, cushion)
 if cushion <= 0
@@ -50,7 +50,7 @@ bgcolor(strategy.position_size > 0 ? color.new(color.green, 88) : na)
 var table t = table.new(position.bottom_right, 2, 3, border_width=1)
 if barstate.islast
     table.cell(t, 0, 0, "Balance", text_color=color.white, bgcolor=color.new(color.gray, 40))
-    table.cell(t, 1, 0, str.tostring(initial_capital + strategy.netprofit, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 1, 0, str.tostring(strategy.initial_capital + strategy.netprofit, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
     table.cell(t, 0, 1, "Lowest cushion $", text_color=color.white, bgcolor=color.new(color.gray, 40))
     table.cell(t, 1, 1, str.tostring(minCushion, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
     table.cell(t, 0, 2, "Breached?", text_color=color.white, bgcolor=breached ? color.new(color.red, 20) : color.new(color.green, 40))
