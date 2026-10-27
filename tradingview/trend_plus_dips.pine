@@ -1,0 +1,48 @@
+//@version=5
+// Trend-hold + dip-buys. Use on the DAILY chart of MNQ1! (long only).
+// Base: hold 1 unit while the close is above the 200-bar average.
+// Plus: +1 unit during each dip trade (they can overlap, so exposure reaches 3 units):
+//   A) 3 down closes in an uptrend, then an up bar -> buy at that close
+//   B) RSI(2) < 5 in an uptrend -> buy at that close
+//   Each dip exits at the first close above the prior bar's high, or after 5 bars.
+strategy("Trend Hold + Dip Buys", overlay=true, process_orders_on_close=true,
+     pyramiding=3, initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.005, slippage=1)
+
+unit = input.int(1, "Contracts per unit", minval=1)
+trendLen = input.int(200, "Trend average length", minval=20)
+maxBars = input.int(5, "Max bars per dip trade", minval=1)
+rsiLevel = input.float(5.0, "RSI(2) below", minval=1)
+
+ma = ta.sma(close, trendLen)
+r = ta.rsi(close, 2)
+upTrend = close > ma
+sigA = close[1] < close[2] and close[2] < close[3] and close[3] < close[4] and close[1] > ma[1] and close > close[1]
+sigB = upTrend and r < rsiLevel
+
+var bool inA = false
+var bool inB = false
+var int barA = na
+var int barB = na
+
+if inA and bar_index > barA and (close > high[1] or bar_index - barA >= maxBars)
+    inA := false
+else if not inA and sigA
+    inA := true
+    barA := bar_index
+
+if inB and bar_index > barB and (close > high[1] or bar_index - barB >= maxBars)
+    inB := false
+else if not inB and sigB
+    inB := true
+    barB := bar_index
+
+target = unit * ((upTrend ? 1 : 0) + (inA ? 1 : 0) + (inB ? 1 : 0))
+diff = target - strategy.position_size
+if diff > 0
+    strategy.order("Buy", strategy.long, qty=diff)
+else if diff < 0
+    strategy.order("Sell", strategy.short, qty=-diff)
+
+plot(ma, "200 MA", color=color.new(color.orange, 0))
+bgcolor(inA or inB ? color.new(color.green, 88) : na)

@@ -1,0 +1,78 @@
+//@version=5
+// 15-minute opening-range breakout with a daily trend filter, sized for a Lucid-style 25K account (1 micro contract).
+// Use on the 5-MINUTE chart of MNQ1!. Always flat by 15:55 New York time, so no overnight or weekend gap risk.
+// Rules: the first 3 five-minute bars (09:30-09:45) set the opening range (OR). If the OR is no wider than maxRangePts,
+//   a 5-minute close above the OR high buys (only if yesterday closed above its 50-day average); a close below the OR low
+//   sells short (only if yesterday closed below it). One trade a day. Stop = stopFrac x OR, target = rr x stop.
+strategy("ORB 15m Trend (Lucid 25K)", overlay=true, initial_capital=25000,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.5, slippage=1)
+
+orBars = input.int(3, "Opening range bars (5m)", minval=1)
+stopFrac = input.float(0.35, "Stop (x opening range)", minval=0.1, step=0.05)
+rr = input.float(2.0, "Target (x stop)", minval=0.5, step=0.25)
+maxRangePts = input.float(150.0, "Skip if opening range wider than (points)", minval=10)
+trendLen = input.int(50, "Daily trend average length", minval=10)
+ddLimit = input.float(1000.0, "Drawdown limit ($)", minval=100)
+
+inSession = not na(time(timeframe.period, "0930-1600", "America/New_York"))
+firstBar = inSession and not inSession[1]
+hhmm = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+
+dailyUp = request.security(syminfo.tickerid, "D", close[1] > ta.sma(close, trendLen)[1], lookahead=barmerge.lookahead_on)
+
+var float orHi = na
+var float orLo = na
+var int barIdx = 0
+var bool traded = false
+if firstBar
+    orHi := high
+    orLo := low
+    barIdx := 1
+    traded := false
+else if inSession
+    barIdx += 1
+    if barIdx <= orBars
+        orHi := math.max(orHi, high)
+        orLo := math.min(orLo, low)
+
+rangePts = orHi - orLo
+canTrade = inSession and barIdx > orBars and hhmm < 1520 and not traded and strategy.position_size == 0 and rangePts <= maxRangePts
+riskPts = stopFrac * rangePts
+if canTrade and close > orHi and dailyUp
+    strategy.entry("Long", strategy.long)
+    traded := true
+if canTrade and close < orLo and not dailyUp
+    strategy.entry("Short", strategy.short)
+    traded := true
+
+if strategy.position_size > 0
+    strategy.exit("Exit L", "Long", loss=riskPts / syminfo.mintick, profit=rr * riskPts / syminfo.mintick)
+if strategy.position_size < 0
+    strategy.exit("Exit S", "Short", loss=riskPts / syminfo.mintick, profit=rr * riskPts / syminfo.mintick)
+if hhmm >= 1555
+    strategy.close_all(comment="EOD")
+
+// Lucid-style drawdown check (floor = peak balance - limit, capped at the start balance)
+var float peak = strategy.initial_capital
+var float minCushion = ddLimit
+var bool breached = false
+bal = strategy.initial_capital + strategy.netprofit
+if strategy.position_size == 0
+    peak := math.max(peak, bal)
+cushion = strategy.equity - math.min(peak - ddLimit, strategy.initial_capital)
+minCushion := math.min(minCushion, cushion)
+if cushion <= 0
+    breached := true
+
+plot(inSession ? orHi : na, "OR high", color=color.new(color.green, 40), style=plot.style_linebr)
+plot(inSession ? orLo : na, "OR low", color=color.new(color.red, 40), style=plot.style_linebr)
+
+var table t = table.new(position.bottom_right, 2, 3, border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "Balance", text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 1, 0, str.tostring(bal, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 0, 1, "Lowest cushion $", text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 1, 1, str.tostring(minCushion, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 0, 2, "Breached?", text_color=color.white, bgcolor=breached ? color.new(color.red, 20) : color.new(color.green, 40))
+    table.cell(t, 1, 2, breached ? "YES" : "no", text_color=color.white, bgcolor=breached ? color.new(color.red, 20) : color.new(color.green, 40))

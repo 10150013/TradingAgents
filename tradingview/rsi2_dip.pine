@@ -1,0 +1,31 @@
+//@version=5
+// RSI(2) dip-buy in an uptrend. Use on the DAILY chart of MNQ1! (or QQQ/SPY). Not for intraday charts.
+// Entry: close above the 200-bar average and RSI(2) below the threshold -> buy at that close.
+// Exit: close above the prior bar's high, or after max bars. Optional stop (0 = off, as in my test).
+strategy("RSI2 Dip Buy", overlay=true, process_orders_on_close=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.005, slippage=1)
+
+rsiLevel = input.float(5.0, "RSI(2) below", minval=1, step=1)
+maxBars = input.int(5, "Max bars in trade", minval=1)
+stopPct = input.float(0.0, "Stop % (0 = off)", minval=0, step=0.5) / 100
+trendLen = input.int(200, "Trend average length", minval=20)
+
+ma = ta.sma(close, trendLen)
+r = ta.rsi(close, 2)
+signal = close > ma and r < rsiLevel
+
+var int entryBar = na
+if signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    entryBar := bar_index
+
+if strategy.position_size > 0
+    if stopPct > 0
+        strategy.exit("Stop", "Long", stop=strategy.position_avg_price * (1 - stopPct))
+    if bar_index > entryBar and (close > high[1] or bar_index - entryBar >= maxBars)
+        strategy.close("Long", comment="Exit")
+
+plot(ma, "200 MA", color=color.new(color.orange, 0))
+plotshape(signal and strategy.position_size == 0, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+alertcondition(signal, "RSI2 dip signal", "RSI2 dip: price above 200 MA and RSI(2) below threshold. Buy at the close.")

@@ -1,0 +1,57 @@
+//@version=5
+// Calm-market dip-buy sized for a Lucid-style 25K account (1 micro contract). Use on the DAILY chart of MNQ1!.
+// Entry (buy at the close): 3 down closes in an uptrend (above the 200-bar average), then an up bar,
+//   but only when the market is calm: 14-bar average true range <= calmMaxPts.
+// Exit: stop at 1x ATR below entry, or the first close above the prior bar's high, or after 3 bars.
+// The table shows a Lucid-style end-of-day drawdown check: floor = peak balance - $1,000, capped at the start balance.
+strategy("Calm Dip Buy (Lucid 25K)", overlay=true, process_orders_on_close=true,
+     initial_capital=25000, default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.5, slippage=1)
+
+trendLen = input.int(200, "Trend average length", minval=20)
+atrLen = input.int(14, "ATR length", minval=2)
+calmMaxPts = input.float(250.0, "Only trade when ATR <= (points)", minval=10)
+stopAtr = input.float(1.0, "Stop (x ATR)", minval=0.2, step=0.1)
+maxBars = input.int(3, "Max bars in trade", minval=1)
+ddLimit = input.float(1000.0, "Drawdown limit ($)", minval=100)
+
+ma = ta.sma(close, trendLen)
+atr = ta.sma(ta.tr, atrLen)
+down3 = close[1] < close[2] and close[2] < close[3] and close[3] < close[4]
+signal = down3 and close[1] > ma[1] and close > close[1] and atr <= calmMaxPts
+
+var int entryBar = na
+var float stopPx = na
+if signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    entryBar := bar_index
+    stopPx := close - stopAtr * atr
+
+if strategy.position_size > 0
+    strategy.exit("Stop", "Long", stop=stopPx)
+    if bar_index > entryBar and (close > high[1] or bar_index - entryBar >= maxBars)
+        strategy.close("Long", comment="Exit")
+
+// Lucid-style end-of-day drawdown check
+var float peak = strategy.initial_capital
+var float minCushion = ddLimit
+var bool breached = false
+peak := math.max(peak, strategy.equity)
+floorBal = math.min(peak - ddLimit, strategy.initial_capital)
+cushion = strategy.equity - floorBal
+minCushion := math.min(minCushion, cushion)
+if cushion <= 0
+    breached := true
+
+plot(ma, "200 MA", color=color.new(color.orange, 0))
+plotshape(signal and strategy.position_size == 0, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 88) : na)
+
+var table t = table.new(position.bottom_right, 2, 3, border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "Balance", text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 1, 0, str.tostring(strategy.initial_capital + strategy.netprofit, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 0, 1, "Lowest cushion $", text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 1, 1, str.tostring(minCushion, "#,###"), text_color=color.white, bgcolor=color.new(color.gray, 40))
+    table.cell(t, 0, 2, "Breached?", text_color=color.white, bgcolor=breached ? color.new(color.red, 20) : color.new(color.green, 40))
+    table.cell(t, 1, 2, breached ? "YES" : "no", text_color=color.white, bgcolor=breached ? color.new(color.red, 20) : color.new(color.green, 40))

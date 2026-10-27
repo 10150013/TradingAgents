@@ -34,6 +34,17 @@ def get_language_instruction() -> str:
     )
 
 
+def get_grounding_rule() -> str:
+    """Keep the debate and decision agents to the data the run actually fetched."""
+    return (
+        " Use only facts from the reports and tool data above. Do not cite outside"
+        " statistics (valuation ratios, economic data, earnings, fund flows, dates) that"
+        " they do not contain; if a number is not there, say it is unavailable instead of"
+        " estimating it. Entry, stop and target prices must come from the market report's"
+        " supply and demand zones."
+    )
+
+
 def opponent_argument_or_opening(text: str, opponent: str) -> str:
     """Opponent's latest argument, or an explicit opening marker when empty.
 
